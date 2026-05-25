@@ -269,18 +269,6 @@
     .chart-legend .forecast::before {
       content: "- - "; color: var(--accent);
     }
-    .chart-toggle {
-      width: 100%;
-      margin-bottom: 0.5rem;
-      padding: 0.45rem;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      border-radius: 8px;
-      color: var(--text);
-      font-size: 0.85rem;
-      cursor: pointer;
-    }
-    .chart-wrap.collapsed { display: none; }
     .migraine-list .corr {
       display: block;
       font-size: 0.72rem;
@@ -332,7 +320,6 @@
       <button type="button" data-range="7d">7d</button>
     </div>
 
-    <button type="button" class="chart-toggle" id="chart-toggle">Hide chart</button>
     <p class="chart-legend" id="chart-legend" style="display:none">
       <span class="past">Measured</span>
       <span class="forecast">Forecast (model)</span>
@@ -375,7 +362,6 @@
     };
 
     let pressureSource = "open-meteo";
-    let chartCollapsed = localStorage.getItem("chart_collapsed") === "1";
     let pullStartY = null;
 
     const CACHE_KEY = "pressure_cache";
@@ -407,6 +393,37 @@
       minute: "2-digit",
       hour12: false,
     });
+    const fmtTooltip = new Intl.DateTimeFormat("en-GB", {
+      timeZone: CONFIG.timezone,
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    function formatHpa(hpa) {
+      return `${Number(hpa).toFixed(1)} hPa`;
+    }
+
+    function tooltipTitleFromMs(ms) {
+      return fmtTooltip.format(new Date(ms));
+    }
+
+    function rateLabelAtPoint(dataPoints, index) {
+      if (index < 1) return null;
+      const t0 = dataPoints[index - 1].x;
+      const t1 = dataPoints[index].x;
+      const y0 = dataPoints[index - 1].y;
+      const y1 = dataPoints[index].y;
+      const hours = (t1 - t0) / 3600000;
+      if (hours <= 0) return null;
+      const rate = (y1 - y0) / hours;
+      if (rate >= -0.5) return "Stable / rising";
+      if (rate >= -1) return `Falling ${Math.abs(rate).toFixed(1)} hPa/h`;
+      return `Falling fast ${Math.abs(rate).toFixed(1)} hPa/h`;
+    }
 
     function parseApiTime(s) {
       return new Date(s.length <= 16 ? s + ":00" : s);
@@ -589,26 +606,10 @@
         srcLabels[pressureSource] || "";
       updateStats();
       updateGlance();
-      applyChartCollapsed();
       loadMigraineLog().then(() => {
         renderChart();
         renderMigraineList();
       });
-    }
-
-    function applyChartCollapsed() {
-      const wrap = document.getElementById("chart-wrap");
-      const btn = document.getElementById("chart-toggle");
-      const leg = document.getElementById("chart-legend");
-      if (chartCollapsed) {
-        wrap.classList.add("collapsed");
-        leg.style.display = "none";
-        btn.textContent = "Show chart";
-      } else {
-        wrap.classList.remove("collapsed");
-        leg.style.display = "flex";
-        btn.textContent = "Hide chart";
-      }
     }
 
     function apiHeaders() {
@@ -914,7 +915,7 @@
         mainData.push(futureData[0]);
       }
 
-      const labels = filtered.map((r) => r.time.getTime());
+      const times = filtered.map((r) => r.time.getTime());
       const tickFmt = new Intl.DateTimeFormat("en-GB", {
         timeZone: CONFIG.timezone,
         weekday: "short",
@@ -922,26 +923,98 @@
         minute: "2-digit",
         hour12: false,
       });
+      const yValues = filtered.map((r) => r.hpa);
+      const yMin = Math.min(...yValues);
+      const yMax = Math.max(...yValues);
+      const yPad = Math.max(2, (yMax - yMin) * 0.08);
 
       const canvas = document.getElementById("pressure-chart");
       if (chartInstance) chartInstance.destroy();
+
+      const useTimeScale = Chart.registry.getScale("time") != null;
+      const xScale = useTimeScale
+        ? {
+            type: "time",
+            min: Math.min(...times),
+            max: Math.max(...times),
+            time: {
+              unit: viewRange === "24h" ? "hour" : "day",
+              displayFormats: {
+                hour: "EEE HH:mm",
+                day: "d MMM",
+              },
+            },
+            ticks: { maxTicksLimit: viewRange === "24h" ? 8 : 7 },
+            grid: { color: "rgba(148,163,184,0.2)" },
+          }
+        : {
+            type: "linear",
+            min: Math.min(...times),
+            max: Math.max(...times),
+            ticks: {
+              maxTicksLimit: 8,
+              callback(value) {
+                const step = viewRange === "24h" ? 6 * 3600000 : 24 * 3600000;
+                const start = Math.min(...times);
+                if ((value - start) % step > step / 4) return "";
+                return tickFmt.format(new Date(value));
+              },
+            },
+            grid: { color: "rgba(148,163,184,0.2)" },
+          };
+
+      const tooltipCallbacks = {
+        title(items) {
+          if (!items.length) return "";
+          const x = items[0].parsed.x;
+          return tooltipTitleFromMs(x);
+        },
+        label(ctx) {
+          const label = ctx.dataset.label || "Pressure";
+          return `${label}: ${formatHpa(ctx.parsed.y)}`;
+        },
+        afterBody(items) {
+          if (!items.length) return [];
+          const ctx = items[0];
+          const ds = ctx.chart.data.datasets[ctx.datasetIndex].data;
+          const rate = rateLabelAtPoint(ds, ctx.dataIndex);
+          const lines = [];
+          if (rate) lines.push(rate);
+          const ptTime = ctx.parsed.x;
+          const ptHpa = ctx.parsed.y;
+          const threeHAgo = ptTime - CONFIG.rapidDropHours * 3600000;
+          let ref = null;
+          for (const r of filtered) {
+            const t = r.time.getTime();
+            if (t <= threeHAgo && (!ref || t > ref.t)) ref = { t, hpa: r.hpa };
+          }
+          if (ref) {
+            const d = ptHpa - ref.hpa;
+            const arrow = d >= 0 ? "▲" : "▼";
+            lines.push(
+              `${CONFIG.rapidDropHours}h change: ${arrow} ${Math.abs(d).toFixed(1)} hPa`
+            );
+          }
+          return lines;
+        },
+      };
 
       chartInstance = new Chart(canvas, {
         type: "line",
         data: {
           datasets: [
             {
-              label: "Pressure",
+              label: "Measured",
               data: mainData.length ? mainData : filtered.map((r) => ({
                 x: r.time.getTime(),
                 y: r.hpa,
               })),
               borderColor: "#0d9488",
-              segment: {
-                borderColor: segmentColor,
-              },
+              segment: { borderColor: segmentColor },
               borderWidth: 2,
               pointRadius: 0,
+              pointHoverRadius: 6,
+              pointHitRadius: 14,
               tension: 0.2,
               fill: false,
             },
@@ -952,6 +1025,8 @@
               borderDash: [6, 4],
               borderWidth: 1.5,
               pointRadius: 0,
+              pointHoverRadius: 6,
+              pointHitRadius: 14,
               tension: 0.2,
               fill: false,
             },
@@ -961,28 +1036,25 @@
           responsive: true,
           maintainAspectRatio: true,
           aspectRatio: 1.6,
-          interaction: { mode: "index", intersect: false },
+          interaction: { mode: "nearest", axis: "x", intersect: false },
           plugins: {
             legend: { display: false },
+            tooltip: {
+              displayColors: true,
+              callbacks: tooltipCallbacks,
+            },
           },
           scales: {
-            x: {
-              type: "linear",
-              min: Math.min(...labels),
-              max: Math.max(...labels),
-              ticks: {
-                maxTicksLimit: 8,
-                callback(value) {
-                  const step = viewRange === "24h" ? 6 * 3600000 : 24 * 3600000;
-                  const start = Math.min(...labels);
-                  if ((value - start) % step > step / 4) return "";
-                  return tickFmt.format(new Date(value));
-                },
-              },
-              grid: { color: "rgba(148,163,184,0.2)" },
-            },
+            x: xScale,
             y: {
               title: { display: true, text: "hPa", color: "#64748b" },
+              min: Math.floor((yMin - yPad) * 10) / 10,
+              max: Math.ceil((yMax + yPad) * 10) / 10,
+              ticks: {
+                callback(value) {
+                  return formatHpa(value);
+                },
+              },
               grid: { color: "rgba(148,163,184,0.2)" },
             },
           },
@@ -1057,12 +1129,6 @@
         .catch(() => alert("Could not save entry. Check server connection."));
     });
 
-    document.getElementById("chart-toggle").addEventListener("click", () => {
-      chartCollapsed = !chartCollapsed;
-      localStorage.setItem("chart_collapsed", chartCollapsed ? "1" : "0");
-      applyChartCollapsed();
-    });
-
     let refreshing = false;
     document.addEventListener("touchstart", (e) => {
       if (window.scrollY <= 0) pullStartY = e.touches[0].clientY;
@@ -1114,14 +1180,25 @@
 
     async function ensureChartJs() {
       if (typeof Chart !== "undefined") return true;
-      const sources = [
+      const chartSources = [
         "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js",
         "https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js",
       ];
-      for (const src of sources) {
+      const adapterSources = [
+        "https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js",
+      ];
+      for (const src of chartSources) {
         try {
           await loadScript(src);
-          if (typeof Chart !== "undefined") return true;
+          if (typeof Chart === "undefined") continue;
+          for (const a of adapterSources) {
+            try {
+              await loadScript(a);
+            } catch (e) {
+              console.warn(e);
+            }
+          }
+          return true;
         } catch (e) {
           console.warn(e);
         }
