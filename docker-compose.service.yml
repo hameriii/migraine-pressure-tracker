@@ -1,0 +1,29 @@
+# Production — paste into your existing docker-compose.yml on the home server.
+# Image is built by GitHub Actions: ghcr.io/hameriii/migraine-pressure-tracker
+#
+# On the server you still need (from this repo):
+#   migraine-tracker/.env
+#   migraine-tracker/data/          (persistent volume)
+#   migraine-tracker/app/           (only if using migraine-app nginx below)
+#   migraine-tracker/nginx/default.conf
+
+  migraine-tracker:
+    image: ghcr.io/hameriii/migraine-pressure-tracker:latest
+    container_name: migraine-tracker
+    restart: unless-stopped
+    env_file: ./migraine-pressure-tracker/migraine-tracker/.env
+    volumes:
+      - ./migraine-pressure-tracker/migraine-tracker/data:/data
+    ports:
+      - "8780:8780"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; f='/data/heartbeat'; t=os.path.getmtime(f) if os.path.exists(f) else 0; exit(0 if time.time()-t < 7200 else 1)"]
+      interval: 30m
+      timeout: 10s
+      retries: 2
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,5 @@
+migraine-tracker/.env
+migraine-tracker/data/*
+!migraine-tracker/data/.gitkeep
+__pycache__/
+*.pyc

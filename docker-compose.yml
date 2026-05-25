@@ -1,0 +1,43 @@
+name: migraine-pressure-tracker
+
+# Local development — run from repo root:
+#   docker compose up -d migraine-tracker
+#   docker compose logs -f migraine-tracker
+#   docker compose down
+
+services:
+  migraine-tracker:
+    build: ./migraine-tracker
+    image: ghcr.io/hameriii/migraine-pressure-tracker:latest
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./migraine-tracker:/app
+      - ./migraine-tracker/data:/data
+    env_file: ./migraine-tracker/.env
+    command: python tracker.py
+    ports:
+      - "8780:8780"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; f='/data/heartbeat'; t=os.path.getmtime(f) if os.path.exists(f) else 0; exit(0 if time.time()-t < 7200 else 1)"]
+      interval: 30m
+      timeout: 10s
+      retries: 2
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Phone app at http://localhost:8765 (proxies /api/ to tracker)
+  migraine-app:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8765:80"
+    volumes:
+      - ./migraine-tracker/app:/usr/share/nginx/html:ro
+      - ./migraine-tracker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - migraine-tracker
