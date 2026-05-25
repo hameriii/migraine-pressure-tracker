@@ -59,6 +59,27 @@ Tell the user to edit `migraine-tracker/.env` (location, ntfy, thresholds). Mini
 - `LATITUDE`, `LONGITUDE`, `TIMEZONE`
 - `NTFY_URL` (no trailing slash), `NTFY_TOPIC`
 - `DATA_DIR=/data` (keep as-is inside container)
+- `APP_URL=http://<server-ip>:8765` (opens phone app from ntfy tap)
+- `API_TOKEN` + `REQUIRE_API_TOKEN=true` recommended on LAN
+- Optional: `QUIET_START`/`QUIET_END`, `SMOOTHING_HOURS`, seasonal `WINTER_*`/`SUMMER_*`
+
+Pin image for stability (optional):
+
+```yaml
+image: ghcr.io/hameriii/migraine-pressure-tracker@sha256:...
+```
+
+---
+
+## API endpoints (tracker container)
+
+| Path | Purpose |
+|------|---------|
+| `/api/config` | App thresholds + location |
+| `/api/pressure?days=30` | Chart data (server log) |
+| `/api/status` | Monitoring / Home Assistant |
+| `/api/migraines` | Migraine log + pressure correlation |
+| `/api/export` | CSV backup download |
 
 ---
 

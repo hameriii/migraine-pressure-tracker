@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+import settings as cfg
+
+DATA_DIR = Path(cfg.DATA_DIR)
 MIGRAINE_LOG_PATH = DATA_DIR / "migraine_log.json"
 
 

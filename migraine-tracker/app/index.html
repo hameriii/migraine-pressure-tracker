@@ -243,6 +243,51 @@
       color: var(--text-muted);
       margin: -0.35rem 0 0.6rem;
     }
+    .glance-bar {
+      display: none;
+      background: var(--accent-light);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 0.75rem;
+      text-align: center;
+    }
+    .glance-bar.visible { display: block; }
+    .glance-bar .hpa { font-size: 2rem; font-weight: 700; color: var(--accent); }
+    .glance-bar .delta { font-size: 0.95rem; margin-top: 0.25rem; }
+    .pull-hint { font-size: 0.7rem; color: var(--text-muted); text-align: center; margin-bottom: 0.5rem; }
+    .chart-legend {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+      display: flex; gap: 0.75rem; flex-wrap: wrap;
+    }
+    .chart-legend span::before {
+      content: "— "; font-weight: 700;
+    }
+    .chart-legend .past::before { color: var(--accent); }
+    .chart-legend .forecast::before {
+      content: "- - "; color: var(--accent);
+    }
+    .chart-toggle {
+      width: 100%;
+      margin-bottom: 0.5rem;
+      padding: 0.45rem;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .chart-wrap.collapsed { display: none; }
+    .migraine-list .corr {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 0.15rem;
+    }
+    .data-source { font-size: 0.7rem; color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -250,10 +295,18 @@
     <header>
       <h1>Barometric Pressure</h1>
       <p id="location-label">Loading…</p>
+      <p class="data-source" id="data-source"></p>
     </header>
 
     <div id="stale-banner" class="banner warn"></div>
     <div id="error-banner" class="banner error"></div>
+    <p class="pull-hint">Pull down to refresh</p>
+
+    <div class="glance-bar" id="glance-bar">
+      <div class="hpa" id="glance-hpa">—</div>
+      <div class="delta" id="glance-delta">—</div>
+      <div id="glance-badge"></div>
+    </div>
 
     <div class="stats" id="stats" style="display:none">
       <div class="stat-card">
@@ -278,6 +331,12 @@
       <button type="button" data-range="24h" class="active">24h</button>
       <button type="button" data-range="7d">7d</button>
     </div>
+
+    <button type="button" class="chart-toggle" id="chart-toggle">Hide chart</button>
+    <p class="chart-legend" id="chart-legend" style="display:none">
+      <span class="past">Measured</span>
+      <span class="forecast">Forecast (model)</span>
+    </p>
 
     <div class="chart-wrap loading" id="chart-wrap">
       <div class="spinner" id="spinner"></div>
@@ -311,9 +370,13 @@
       // Migraine log on home server. Use "/api" when app is served via nginx (port 8765).
       // Set to "" to keep logs on this phone only (localStorage).
       apiBase: "/api",
-      // Must match API_TOKEN in .env if you set one on the server.
       apiToken: "",
+      watchDropFraction: 0.5,
     };
+
+    let pressureSource = "open-meteo";
+    let chartCollapsed = localStorage.getItem("chart_collapsed") === "1";
+    let pullStartY = null;
 
     const CACHE_KEY = "pressure_cache";
     const MIGRAINE_KEY = "migraine_log";
@@ -358,6 +421,47 @@
       );
     }
 
+    async function loadServerConfig() {
+      if (!useServerLog()) return;
+      try {
+        const resp = await fetch(apiUrl("/config"), { headers: apiHeaders() });
+        if (!resp.ok) return;
+        const c = await resp.json();
+        Object.assign(CONFIG, {
+          latitude: c.latitude ?? CONFIG.latitude,
+          longitude: c.longitude ?? CONFIG.longitude,
+          timezone: c.timezone ?? CONFIG.timezone,
+          rapidDropHpa: c.rapidDropHpa ?? CONFIG.rapidDropHpa,
+          rapidDropHours: c.rapidDropHours ?? CONFIG.rapidDropHours,
+          sustainedDropHpa: c.sustainedDropHpa ?? CONFIG.sustainedDropHpa,
+          sustainedDropHours: c.sustainedDropHours ?? CONFIG.sustainedDropHours,
+          watchDropFraction: c.watchDropFraction ?? CONFIG.watchDropFraction,
+          apiBase: c.apiBase ?? CONFIG.apiBase,
+        });
+        if (c.authRequired && !CONFIG.apiToken) {
+          console.warn("Server expects API_TOKEN in CONFIG.apiToken");
+        }
+      } catch (e) {
+        console.warn("Config fetch failed", e);
+      }
+    }
+
+    function parseReadingsFromApi(data) {
+      return (data.readings || []).map((r) => ({
+        time: parseApiTime(r.time),
+        hpa: r.hpa,
+      }));
+    }
+
+    async function fetchPressureFromServer() {
+      const resp = await fetch(apiUrl("/pressure?days=14"), {
+        headers: apiHeaders(),
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      return parseReadingsFromApi(data);
+    }
+
     function loadCache() {
       try {
         const raw = localStorage.getItem(CACHE_KEY);
@@ -400,11 +504,10 @@
       const staleBanner = document.getElementById("stale-banner");
       chartWrap.classList.add("loading");
       spinner.style.display = "flex";
-      errorBanner.classList.remove("error");
       errorBanner.style.display = "none";
-      staleBanner.classList.remove("warn");
       staleBanner.style.display = "none";
 
+      await loadServerConfig();
       document.getElementById("location-label").textContent =
         `${CONFIG.latitude}°, ${CONFIG.longitude}° · ${CONFIG.timezone}`;
 
@@ -414,17 +517,31 @@
 
       if (offline && cacheFresh) {
         allReadings = cache.data;
+        pressureSource = "cache";
         finishLoad();
         return;
       }
 
       try {
+        if (useServerLog()) {
+          try {
+            allReadings = await fetchPressureFromServer();
+            pressureSource = "server";
+            saveCache(allReadings);
+            finishLoad();
+            return;
+          } catch (e) {
+            console.warn("Server pressure failed, trying Open-Meteo", e);
+          }
+        }
         allReadings = await fetchPressure();
+        pressureSource = "open-meteo";
         saveCache(allReadings);
         finishLoad();
       } catch (err) {
         if (cache) {
           allReadings = cache.data;
+          pressureSource = "cache";
           const ageH = ((Date.now() - cache.fetched) / 3600000).toFixed(1);
           if (Date.now() - cache.fetched > STALE_WARN_MS) {
             staleBanner.textContent = `⚠ Data from ${ageH} hours ago — could not refresh`;
@@ -441,15 +558,57 @@
       }
     }
 
+    function updateGlance() {
+      const cur = currentReading();
+      const bar = document.getElementById("glance-bar");
+      if (!cur) return;
+      bar.classList.add("visible");
+      document.getElementById("glance-hpa").textContent = `${cur.hpa.toFixed(1)} hPa`;
+      const r3 = readingAtHoursAgo(CONFIG.rapidDropHours);
+      const el = document.getElementById("glance-delta");
+      if (r3) {
+        const d = cur.hpa - r3.hpa;
+        el.textContent = `${d >= 0 ? "▲" : "▼"} ${Math.abs(d).toFixed(1)} hPa (${CONFIG.rapidDropHours}h)`;
+        el.style.color = d >= 0 ? "var(--green)" : "var(--danger)";
+      }
+      document.getElementById("glance-badge").innerHTML =
+        document.getElementById("stat-status").innerHTML;
+    }
+
     function finishLoad() {
       document.getElementById("spinner").style.display = "none";
       document.getElementById("chart-wrap").classList.remove("loading");
       document.getElementById("stats").style.display = "grid";
+      document.getElementById("chart-legend").style.display = "flex";
+      const srcLabels = {
+        server: "Data: home server log",
+        "open-meteo": "Data: Open-Meteo (live)",
+        cache: "Data: cached",
+      };
+      document.getElementById("data-source").textContent =
+        srcLabels[pressureSource] || "";
       updateStats();
+      updateGlance();
+      applyChartCollapsed();
       loadMigraineLog().then(() => {
         renderChart();
         renderMigraineList();
       });
+    }
+
+    function applyChartCollapsed() {
+      const wrap = document.getElementById("chart-wrap");
+      const btn = document.getElementById("chart-toggle");
+      const leg = document.getElementById("chart-legend");
+      if (chartCollapsed) {
+        wrap.classList.add("collapsed");
+        leg.style.display = "none";
+        btn.textContent = "Show chart";
+      } else {
+        wrap.classList.remove("collapsed");
+        leg.style.display = "flex";
+        btn.textContent = "Hide chart";
+      }
     }
 
     function apiHeaders() {
@@ -541,13 +700,15 @@
         if (!resp.ok) throw new Error("Save failed");
         const data = await resp.json();
         const saved = data.entry || entry;
+        if (data.correlation) saved.correlation = data.correlation;
         migraineLog = migraineLog.filter((e) => e.time !== saved.time);
         migraineLog.push(saved);
         migraineLog.sort((a, b) => a.time.localeCompare(b.time));
-        return;
+        return saved;
       }
       migraineLog.push(entry);
       localStorage.setItem(MIGRAINE_KEY, JSON.stringify(migraineLog));
+      return entry;
     }
 
     async function removeMigraineEntry(time) {
@@ -622,10 +783,11 @@
       let text = "● STABLE";
       if (r3) {
         const drop3 = r3.hpa - cur.hpa;
+        const frac = CONFIG.watchDropFraction ?? 0.5;
         if (drop3 >= CONFIG.rapidDropHpa) {
           badge = "alert";
           text = "🔴 DROP ALERT";
-        } else if (drop3 >= CONFIG.rapidDropHpa * 0.5) {
+        } else if (drop3 >= CONFIG.rapidDropHpa * frac) {
           badge = "watch";
           text = "⚠ WATCH";
         }
@@ -635,7 +797,10 @@
         if (drop24 >= CONFIG.sustainedDropHpa) {
           badge = "alert";
           text = "🔴 DROP ALERT";
-        } else if (drop24 >= CONFIG.sustainedDropHpa * 0.5 && badge !== "alert") {
+        } else if (
+          drop24 >= CONFIG.sustainedDropHpa * (CONFIG.watchDropFraction ?? 0.5) &&
+          badge !== "alert"
+        ) {
           badge = "watch";
           text = "⚠ WATCH";
         }
@@ -842,7 +1007,10 @@
         const li = document.createElement("li");
         const label = fmtList.format(new Date(entry.time));
         const note = entry.note ? ` — ${entry.note}` : "";
-        li.innerHTML = `<span>${label}${note}</span>`;
+        const corr = entry.correlation?.summary
+          ? `<span class="corr">${entry.correlation.summary}</span>`
+          : "";
+        li.innerHTML = `<span>${label}${note}${corr}</span>`;
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "✕";
@@ -879,12 +1047,35 @@
       pendingMigraineTime = null;
       document.getElementById("note-form").classList.remove("open");
       addMigraineEntry(time, note)
-        .then(() => {
+        .then((saved) => {
+          if (saved?.correlation?.summary) {
+            alert(saved.correlation.summary);
+          }
           renderMigraineList();
           if (chartInstance) renderChart();
         })
         .catch(() => alert("Could not save entry. Check server connection."));
     });
+
+    document.getElementById("chart-toggle").addEventListener("click", () => {
+      chartCollapsed = !chartCollapsed;
+      localStorage.setItem("chart_collapsed", chartCollapsed ? "1" : "0");
+      applyChartCollapsed();
+    });
+
+    let refreshing = false;
+    document.addEventListener("touchstart", (e) => {
+      if (window.scrollY <= 0) pullStartY = e.touches[0].clientY;
+    }, { passive: true });
+    document.addEventListener("touchmove", (e) => {
+      if (pullStartY == null || refreshing) return;
+      if (e.touches[0].clientY - pullStartY > 80 && window.scrollY <= 0) {
+        refreshing = true;
+        pullStartY = null;
+        loadData().finally(() => { refreshing = false; });
+      }
+    }, { passive: true });
+    document.addEventListener("touchend", () => { pullStartY = null; });
 
     document.querySelectorAll(".view-toggle button").forEach((btn) => {
       if (btn.dataset.range === viewRange) {

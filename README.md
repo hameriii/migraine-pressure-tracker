@@ -217,17 +217,43 @@ The healthcheck fails if `data/heartbeat` is older than 2 hours — usually mean
 
 ---
 
-## Migraine log API
+## Features
 
-The tracker exposes a small JSON API (stdlib, same container as `tracker.py`):
+- **Server pressure log** — chart prefers `/api/pressure` (same data as alerts)
+- **Quiet hours** — skip routine ntfy at night (`QUIET_START` / `QUIET_END`)
+- **Smoothed alerts** — `SMOOTHING_HOURS` reduces spike false alarms
+- **Pre-alert watch** — early warning at 50% of rapid threshold
+- **Seasonal thresholds** — `WINTER_*` / `SUMMER_*` for Dec–Feb and Jun–Aug
+- **Deadman alert** — ntfy if polling stops (`DEADMAN_*`)
+- **Migraine ↔ pressure correlation** — on log and in the list
+- **CSV export** — `GET /api/export`
+- **Status API** — `GET /api/status` (Home Assistant friendly)
+- **Pull-to-refresh** and **glance bar** on the phone app
+- **Weekly digest** — `scripts/weekly-digest.py` (cron + ntfy)
+- **Backup script** — `scripts/backup-data.sh`
+
+See [`docs/HOME_ASSISTANT.md`](docs/HOME_ASSISTANT.md) and [`docs/SHORTCUTS.md`](docs/SHORTCUTS.md).
+
+## Migraine log API
 
 | Method | Path | Action |
 |--------|------|--------|
-| GET | `/api/migraines` | List all entries |
-| POST | `/api/migraines` | Body: `{"time":"ISO","note":"..."}` |
-| DELETE | `/api/migraines?time=...` | Remove one entry |
+| GET | `/api/config` | Public app config (no auth if token unset) |
+| GET | `/api/status` | Health, current hPa, alert state |
+| GET | `/api/pressure?days=30` | Pressure readings from server log |
+| GET | `/api/migraines` | Migraine entries + correlation |
+| POST | `/api/migraines` | `{"time":"ISO","note":"..."}` |
+| DELETE | `/api/migraines?time=...` | Remove entry |
+| GET | `/api/export` | CSV download |
 
-Optional auth: set `API_TOKEN` in `.env`, send `Authorization: Bearer <token>` from the app.
+Auth: set `API_TOKEN` and `REQUIRE_API_TOKEN=true` on the home server; set `CONFIG.apiToken` in `index.html`.
+
+## Backup
+
+```bash
+./scripts/backup-data.sh
+# archives migraine-tracker/data/*.json to ./backups/
+```
 
 ---
 
